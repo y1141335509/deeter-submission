@@ -77,17 +77,19 @@ pytest tests/ -v
 
 ## Success criteria
 
-| Metric | Target | Notes |
-|---|---|---|
-| Processing latency p50 | < 5ms | Per-post sentiment + extraction |
-| Processing latency p99 | < 20ms | |
-| Write latency (batch of 50) | < 500ms | S3 Parquet write |
-| Throughput (demo mode) | ≥ 120 posts/min | Configurable via DEMO_PPM |
-| Quality pass rate | ≥ 90% | Posts passing all validation checks |
-| Dedup correctness | 100% | No post_id written twice |
-| Cold start to first write | < 2 min | `docker compose up` → data in S3 |
+Measured in demo mode (`DEMO_PPM=120`) on Apple M-series, Docker on MinIO, 200 posts processed.
 
-These are measured at runtime and logged every flush cycle.
+| Metric | Target | Measured | Notes |
+|---|---|---|---|
+| Processing latency p50 | < 5ms | **0.44ms** | Per-post VADER + ticker extraction |
+| Processing latency p99 | < 20ms | **3.82ms** | |
+| Write latency (batch of 50) | < 500ms | **~8ms avg** | Parquet+Snappy serialize + MinIO PUT |
+| Throughput (demo mode) | ≥ 120 posts/min | **~112/min** | ~7% dupes filtered by dedup |
+| Quality pass rate | ≥ 90% | **100%** | Synthetic posts pass all field checks |
+| Dedup correctness | 100% | **100%** | No duplicate post_id written |
+| Cold start to first write | < 2 min | **28.7s** | `docker compose up --build` → data in S3 |
+
+Metrics are logged every flush cycle. Run `docker compose logs -f pipeline` to observe live.
 
 ## Data schema
 

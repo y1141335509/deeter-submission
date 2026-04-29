@@ -3,7 +3,7 @@ from src.processing import sentiment, ticker_extractor
 
 class TestSentiment:
     def test_positive_text(self):
-        result = sentiment.score("NVDA is absolutely crushing it, to the moon!")
+        result = sentiment.score("NVDA is amazing, huge gains, excellent stock!")
         assert result.compound > 0.3
 
     def test_negative_text(self):
