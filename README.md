@@ -130,28 +130,43 @@ post's self-reported `createdAt`. Clients can backdate their own
 
 Measured on Apple M-series, Docker on local MinIO. **Demo mode** numbers
 exercise the pipeline without network variability; **live mode** numbers are
-representative of real Jetstream traffic.
+from a sustained run against the Bluesky Jetstream firehose (~4 minutes of
+steady-state ingestion, 1,050 posts written).
 
 | Metric | Target | Demo mode | Live (Jetstream) |
 |---|---|---|---|
-| Processing latency p50 | < 5 ms | 0.44 ms | similar — VADER + regex |
-| Processing latency p99 | < 20 ms | 3.82 ms | similar |
-| Write latency (batch of 50) | < 500 ms | ~8 ms | ~8 ms (MinIO local) |
-| Throughput | ≥ batch / batch_timeout | 112 / min | bounded by financial-prefilter pass-through |
-| Quality pass rate | ≥ 90% | 100% (clean templates) | depends on real-text quality |
-| Cold start to first write | < 2 min | 28.7 s | < 2 min (incl. Jetstream connect) |
+| Processing latency p50 | < 5 ms | 0.44 ms | **0.36–0.40 ms** |
+| Processing latency p99 | < 20 ms | 3.82 ms | **5–8 ms** |
+| Forwarded throughput | — | 113 / min | **280–300 / min** |
+| Firehose ingest rate | — | n/a | **~42 events/sec** |
+| Financial-filter pass rate | — | n/a | **~11% (1,050 / 9,598)** |
+| Quality pass rate | ≥ 90% | 100% (clean templates) | **100%** |
+| Reconnects | 0 | n/a | **0** (over 4 min) |
+| Queue-full drops | 0 | n/a | **0** |
+| Feed lag | < 1 s | n/a | **0.01–0.04 s** |
+| Cold start to first write | < 2 min | 28.7 s | **~30 s** |
 
-Live throughput is dominated by the **financial-relevance prefilter pass-through
-rate**: roughly 1–5% of all Bluesky posts mention financial topics, so a 100
-events/sec firehose feeds the downstream pipeline at 1–5 events/sec on average.
-This is intentional — the pipeline isn't trying to write every Bluesky post,
-it's trying to write the financially relevant ones.
+A few things worth noting from these numbers:
+
+- **Bluesky has much lower ticker density than Reddit's r/wallstreetbets.** Of
+  1,050 posts that pass the financial keyword filter, only ~2% mention a
+  specific stock ticker (21 mentions across 18 posts in this run). The
+  pipeline correctly captures the signal that exists, but Bluesky simply has
+  fewer "$NVDA"-style posts than the financial-Reddit equivalent. This is
+  honest empirical data, not a system limitation.
+- **The keyword prefilter is intentionally permissive.** The 11% pass-through
+  is higher than I expected — short keywords like `rate`, `bull`, `bear`
+  match inside unrelated words (`underrate`, `bullshit`, `bear hug`). Doing
+  precise filtering at this stage would risk dropping real signal; the
+  downstream ticker extractor + quality validator do the cleanup.
+- **Reconnects = 0 over 4 min is anecdotal.** Longer runs will eventually hit
+  drops; the `[firehose]` metric block will surface them when they happen.
 
 The metrics block is logged on every flush, not only on shutdown:
 
 ```
-[pipeline] elapsed=125.3s ingested=4801 processed=128 written=100 dups=12 quality=98.3% throughput=61.2/min p50=0.41ms p99=3.10ms
-[firehose] received=4801 forwarded=128 non_fin=4661 queue_full=0 reconnects=0 rate=38.4/s lag=0.7s
+[pipeline]  elapsed=225.1s ingested=1050 processed=1050 written=1050 dups=0 quality=100.0% throughput=279.9/min p50=0.39ms p99=8.17ms
+[firehose]  received=9598 forwarded=1050 non_fin=8548 queue_full=0 reconnects=0 rate=42.58/s lag=0.01s
 ```
 
 ## Data schema
