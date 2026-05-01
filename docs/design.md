@@ -168,6 +168,60 @@ Everything else lives in S3. Restarts are cheap, and multiple instances can
 in principle run in parallel against partitioned data. The firehose cursor is
 the only piece that requires careful handling under restart.
 
+## Empirical validation: design vs. measurement
+
+The architectural choices above were made before the system ran live. After a
+14-minute sustained run against the Jetstream firehose (35,545 raw events,
+3,700 posts written), here's how each choice held up:
+
+**The bounded queue did its job.** `queue_full = 0` for the entire run — the
+downstream pipeline kept up with the ~43 events/sec firehose rate even after
+financial filtering. The queue exists for the case where downstream stalls
+(an S3 outage, a slow VADER cold-start). It didn't fire here, but the
+mechanism is observable and tested via `dropped_queue_full` counter, so we
+know it's wired up.
+
+**The financial prefilter is more permissive than I designed for.** I expected
+1–5% pass-through; actual is **10.3%** (3,650 / 35,545). Short keywords
+(`rate`, `bull`, `bear`, `long`, `short`) match inside unrelated words
+(`underrate`, `bullshit`, `bear hug`, `belong`). This is acceptable for a
+coarse early filter — the downstream ticker extractor and quality validator
+filter precisely. But it's also a real finding: at higher firehose volume the
+extra CPU spent on these false-positive matches would matter. Tightening
+would mean either word-boundary matching (`\brate\b`) or moving from keyword
+match to a tiny classifier.
+
+**Ticker density on Bluesky is much lower than expected.** Of the 3,700
+financially-relevant posts, only ~1.2% mention a specific ticker (50
+mentions across 44 posts). On Reddit's r/wallstreetbets the equivalent rate
+would likely be 30–50%. This is the most important finding from the live
+run, and it's an observation about the source, not the system: Bluesky's
+financial culture differs from Reddit's. The right architectural response
+is **add a second source** rather than tune the filter — and the
+`IngestionSource` Protocol in `pipeline.py` makes that a single-file
+addition (`src/ingestion/<new_source>.py` implementing `start/stop/stream`).
+
+**Server timestamps work as intended.** No anomalies, no out-of-order events
+seen during the run. The `cursor` (driven by `time_us`) is monotonic in
+practice for a single connection.
+
+**Cursor-on-disk hasn't been stress-tested.** The 14-minute run never
+restarted, so the resume-from-cursor path didn't exercise. This is the
+biggest gap between design and validation. A simple manual test
+(`docker compose stop pipeline && docker compose start pipeline`) would
+close it.
+
+**VADER + regex per-post latency is well under target.** p50 around 0.36 ms,
+p99 around 2.8 ms steady-state — comfortably below the 5 ms / 20 ms targets.
+Cold-start outliers (first ~30 s) pushed p99 briefly to ~8 ms; once the JIT
+caches warmed up, p99 settled.
+
+**The reconnect/backoff/host-rotation logic was not tested in production.**
+`reconnects = 0` over 14 minutes. The code is unit-tested at the parsing
+level and exercised manually via a smoke script during development, but the
+reconnect path itself has not run against a real network failure. This is
+a real gap.
+
 ## What would change at 100x scale
 
 **Volume.** A single Python process keeping up with 100×Jetstream is

@@ -167,8 +167,8 @@ A few things worth noting from these numbers:
 The metrics block is logged on every flush, not only on shutdown:
 
 ```
-[pipeline]  elapsed=225.1s ingested=1050 processed=1050 written=1050 dups=0 quality=100.0% throughput=279.9/min p50=0.39ms p99=8.17ms
-[firehose]  received=9598 forwarded=1050 non_fin=8548 queue_full=0 reconnects=0 rate=42.58/s lag=0.01s
+[pipeline]  elapsed=828.3s ingested=3650 processed=3650 written=3650 dups=0 quality=100.0% throughput=264.4/min p50=0.36ms p99=2.84ms
+[firehose]  received=35545 forwarded=3650 non_fin=31895 queue_full=0 reconnects=0 rate=42.90/s lag=0.02s
 ```
 
 ## Data schema
