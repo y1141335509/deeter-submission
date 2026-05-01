@@ -25,6 +25,9 @@ htmlcov/
 .idea/
 *.swp
 
+# Personal notes
+todo.md
+
 # OS
 .DS_Store
 Thumbs.db
