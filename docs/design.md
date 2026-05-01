@@ -206,11 +206,23 @@ addition (`src/ingestion/<new_source>.py` implementing `start/stop/stream`).
 seen during the run. The `cursor` (driven by `time_us`) is monotonic in
 practice for a single connection.
 
-**Cursor-on-disk hasn't been stress-tested.** The 14-minute run never
-restarted, so the resume-from-cursor path didn't exercise. This is the
-biggest gap between design and validation. A simple manual test
-(`docker compose stop pipeline && docker compose start pipeline`) would
-close it.
+**Cursor-on-disk works end-to-end, including backfill on resume.** Verified
+manually by `docker compose stop pipeline && sleep 5 && docker compose start pipeline`:
+
+```text
+21:44:23 [firehose] received=62542 ... rate=43.59/s        ← steady state
+21:44:35 INFO  Resuming firehose from cursor=1777671863200482
+21:44:36 INFO  Connected: ... cursor=1777671863200482
+21:44:38 [firehose] received=615 forwarded=50 rate=199.91/s   ← catch-up burst
+21:45:05 [firehose] received=1696 ... rate=55.82/s             ← back to live
+```
+
+The cursor was loaded from disk on startup, the WebSocket was reopened with
+`cursor=...` in the URL, and Jetstream replayed the events that occurred
+during the 5-second downtime — the post-resume `rate=199.91/s` is ~5×
+steady-state, which is the catch-up burst. This means a brief pipeline
+restart loses no data; the only window of true loss is when the cursor
+hasn't been written yet (default: every 10s of activity).
 
 **VADER + regex per-post latency is well under target.** p50 around 0.36 ms,
 p99 around 2.8 ms steady-state — comfortably below the 5 ms / 20 ms targets.
