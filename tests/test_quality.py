@@ -7,14 +7,14 @@ from src.quality.dedup import Deduplicator
 def _make_post(**overrides) -> ProcessedPost:
     defaults = dict(
         post_id="abc123",
-        subreddit="wallstreetbets",
+        source="bluesky",
         title="NVDA to the moon — buying calls",
         body="Strong earnings, AI demand unstoppable",
         score=1500,
         upvote_ratio=0.92,
         num_comments=230,
         created_utc=time.time(),
-        url="https://reddit.com/r/wallstreetbets/abc123",
+        url="https://bsky.app/profile/example/post/abc123",
         fetched_at=time.time(),
         sentiment_compound=0.65,
         sentiment_positive=0.4,

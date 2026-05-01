@@ -2,7 +2,53 @@
 
 ## Problem framing
 
-The objective is to turn high-volume, noisy social text into a structured, trustworthy signal that ML models can train on. The challenge is not just ingestion — it's that raw social data is messy (deleted posts, spam, non-financial content, duplicate submissions), and a model trained on corrupt inputs will learn the wrong patterns. Data quality is as important as throughput.
+The objective is to turn high-volume, noisy social text into a structured,
+trustworthy signal that ML models can train on. The challenge is not just
+ingestion — it's that raw social data is messy (deleted posts, spam, non-financial
+content, duplicate submissions, deceptive timestamps), and a model trained on
+corrupt inputs will learn the wrong patterns. Data quality is as important as
+throughput.
+
+## Project history: Reddit (v1) → Bluesky firehose (v2)
+
+The first commit of this project ingested Reddit via the PRAW library. PRAW is
+convenient — `subreddit.stream.submissions()` yields posts in a `for` loop —
+but it hides the entire connection layer. The code didn't show any reasoning
+about reconnects, backpressure, sequence gaps, cursor durability, or
+resumability across restarts, because PRAW handled all of those invisibly.
+
+For a role explicitly framed around "real-time systems" and "ingestion
+pipelines from external providers", that opacity was the wrong signal.
+
+The pivot to Bluesky's Jetstream firehose was driven by three concerns:
+
+1. **Real WebSocket handling.** Jetstream is a public WebSocket, no SDK in
+   between, so the code now contains the actual connection lifecycle:
+   reconnect with exponential backoff, host rotation across regions, cursor
+   persistence, gap detection. These are the questions a senior engineer
+   would ask in an interview, and they're now visible in code.
+
+2. **Real distribution of inputs.** v1's demo mode used a fixed pool of 20
+   templates. The DuckDB analysis of v1's output revealed a cute artefact —
+   `LOW` and `QQQ` had identical mention counts (4352 each) because they were
+   always co-extracted from the same template "Rate cut expectations pushing
+   QQQ higher". This was symptomatic of two real problems: the demo
+   distribution was unrealistically narrow, and the ticker extractor had a
+   case-folding bug (`text.upper()` was matching English `"low"` against the
+   `LOW` ticker). v2 fixes both — Bluesky text is real human writing, and the
+   extractor only matches bare-word tickers that are uppercase in the source.
+
+3. **Volume.** Reddit's submission stream is paced by user posting frequency
+   (a few per minute across the financial subreddits). Bluesky's firehose
+   averages 50–200 events/sec across the entire network. The pipeline
+   doesn't need that volume to be useful, but having it forces real
+   decisions about backpressure that are missing from any low-volume
+   pipeline.
+
+The Reddit version was kept in git history rather than rewritten. The diff
+between v1 and v2 is itself part of the submission — it shows iteration
+under a constraint (better demonstration of streaming infrastructure)
+rather than ground-up rewriting.
 
 ## Architecture decisions
 
@@ -10,70 +56,152 @@ The objective is to turn high-volume, noisy social text into a structured, trust
 
 Raw posts and per-ticker mentions are written as separate Parquet tables.
 
-The posts table preserves full context (title, body, quality metadata). The mentions table is a pre-exploded join: one row per (post, ticker) pair, making it fast to query "all NVDA mentions in the last 6 hours" without scanning posts and filtering.
+The posts table preserves full context (title, body, quality metadata). The
+mentions table is a pre-exploded join: one row per (post, ticker) pair,
+making it fast to query "all NVDA mentions in the last 6 hours" without
+scanning posts and filtering.
 
-A model that needs per-ticker time-series sentiment reads the mentions table. A model that needs full text reads the posts table. No join required at training time.
+A model that needs per-ticker time-series sentiment reads the mentions
+table. A model that needs full text reads the posts table. No join required
+at training time.
+
+### Bounded queue with drop-on-full, not unbounded buffering
+
+The firehose runs in a background thread on its own asyncio loop and pushes
+parsed posts into a `queue.Queue(maxsize=N)`. The main pipeline thread
+consumes from this queue.
+
+Three options were on the table:
+
+- **Unbounded buffer**: simple, but a downstream stall (e.g. S3 outage) would
+  cause memory to grow without bound and eventually OOM.
+- **Block on full queue**: applies backpressure to the WebSocket reader, but
+  Jetstream will eventually disconnect a client that doesn't read fast
+  enough. Worse, a slow downstream becomes a connection problem rather than
+  a metric.
+- **Drop on full queue with counters** (chosen): the system stays connected
+  and stable; the operator can see exactly how often the pipeline is over
+  capacity via `dropped_queue_full`. Drops are explicit data loss, but
+  they're observable and bounded — much easier to debug than memory exhaustion
+  or mysterious disconnects.
+
+### Server timestamps over client timestamps
+
+Jetstream events carry both `time_us` (server-observed) and `record.createdAt`
+(client-supplied). The pipeline uses `time_us` as `created_utc`. A malicious
+or buggy client can put any value in `createdAt`, including the future or far
+past; relying on it would mean training data could be poisoned by anyone with
+a Bluesky account.
+
+### Cursor persistence to local disk, not S3
+
+The firehose cursor (a microsecond timestamp) is written every 10 seconds to
+a local file mounted as a Docker volume. Alternatives considered:
+
+- **S3 cursor file**: durable across container loss, but S3 latency is 20–50ms
+  per write, so 10s frequency means ~0.5% of pipeline write traffic is just
+  cursor updates, and an S3 outage would block the firehose loop.
+- **Redis / etcd**: external dependency just for one integer.
+- **Local file** (chosen): atomic write via `os.replace`, sub-millisecond,
+  durable across pod restarts as long as the volume mount persists. For
+  cross-host failover we'd move it to S3, but at single-host scale this is
+  enough.
+
+### Financial-relevance prefilter at ingestion
+
+A keyword/cashtag-based prefilter runs immediately after parsing, before
+sentiment scoring. Most Bluesky posts (~95%) are not about finance, and
+running VADER + ticker regex on every post would waste CPU.
+
+This is deliberately a coarse, false-positive-friendly filter. The downstream
+ticker extractor and quality validator do precise filtering. Doing the cheap
+filter early keeps the per-event cost low enough that the pipeline can keep
+up with the firehose on a single core.
 
 ### Parquet + Snappy over JSON
 
-Options considered: raw JSON to S3, NDJSON, CSV, Parquet.
-
-Parquet was chosen because:
-- **Columnar reads**: training jobs typically read sentiment_compound + created_utc for a specific ticker, not full rows. Parquet makes this 10–100x faster than row-based formats.
-- **Snappy compression**: ~3x size reduction vs JSON at minimal CPU cost.
-- **Explicit schema**: the schema is enforced at write time (pyarrow), so corrupt or type-mismatched records fail loudly rather than silently passing through.
+Parquet was chosen for the same reasons as v1: columnar reads, ~3x compression
+vs JSON, and the explicit schema fails loudly on type mismatch rather than
+allowing corrupt records through silently.
 
 ### Time-based partitioning over ticker-based
 
 S3 key structure: `posts/year=YYYY/month=MM/day=DD/hour=HH/batch_*.parquet`
 
-Alternative considered: partition by ticker (e.g. `mentions/ticker=NVDA/...`).
+Time-based partitioning fits the write pattern (append-only, time-ordered)
+and produces manageable file counts. Ticker-based partitioning would be
+ideal for single-ticker queries but creates thousands of small files and
+complicates writes (one batch touches many partitions). Downstream query
+tools (Athena, DuckDB, Spark) can filter by ticker using Parquet column
+statistics without scanning every partition — and the pre-exploded mentions
+table makes per-ticker scans cheap regardless.
 
-Ticker-based partitioning would be ideal for single-ticker queries but creates thousands of small files and complicates writes (one batch touches many partitions). Time-based partitioning fits the write pattern (append-only, roughly time-ordered) and keeps file sizes manageable. Downstream query tools (Athena, Spark) can filter by ticker using Parquet column statistics without scanning every partition.
+### Sliding-window deduplication, in memory
 
-### Sliding window deduplication over persistent state
-
-Reddit's streaming API occasionally re-delivers posts. Deduplication uses an in-memory ordered dict keyed by post_id, with entries evicted after 1 hour.
-
-A Redis-backed set would survive restarts, but adds an external dependency and operational complexity. For a 1-hour window the memory footprint is bounded (~100MB worst case at extreme post volume). On restart, the worst case is re-processing a small number of posts from the last hour — acceptable because S3 writes are idempotent by design (post_id is a natural key and downstream consumers can dedup on read).
-
-### Batch writes over per-record writes
-
-S3 PUT requests have fixed latency overhead (~20–50ms). Writing 50 posts per batch rather than 50 individual PUTs reduces S3 request cost by 50x and keeps write latency from dominating end-to-end processing time.
-
-Batch timeout of 30 seconds ensures data lands in S3 promptly even during low-volume periods.
+The dedup layer uses an in-memory ordered dict keyed by `post_id` with a
+1-hour TTL. The main reason dedup matters here is that the firehose can
+re-deliver events on reconnect (cursor resume can replay a few seconds of
+overlap). Persistent dedup state (Redis) would survive restarts, but the
+worst case at restart is re-processing a small window of recent events,
+which is harmless because S3 writes use deterministic keys (`post_id`) and
+downstream consumers can dedup on read.
 
 ### VADER over FinBERT
 
-VADER is a rule-based sentiment analyzer optimized for social media text. FinBERT is a BERT variant fine-tuned on financial news.
+VADER is rule-based, runs in <1ms per post, has no model download, and was
+designed for social-media text. FinBERT is more accurate on formal financial
+news but adds 50ms per post on CPU and a 400MB model download.
 
-VADER was chosen for this implementation because:
-- **Latency**: VADER runs in <1ms per post. FinBERT requires ~50ms on CPU (or a GPU).
-- **No model download at startup**: FinBERT requires downloading a 400MB model, which complicates Docker builds and cold starts.
-- **Good enough for social text**: VADER was designed for social media language (slang, caps, emojis), which is exactly what WSB posts contain.
+The sentiment scorer is isolated in `src/processing/sentiment.py`. Swapping
+to FinBERT requires changing one function — the rest of the pipeline doesn't
+care.
 
-The sentiment scorer is isolated in `src/processing/sentiment.py` with a clean interface. Swapping to FinBERT requires changing one function.
+### Stateless workers (mostly)
 
-### Stateless pipeline workers
+The pipeline holds three pieces of state:
 
-The pipeline holds no state except the dedup window and signal aggregator. All durable state goes to S3. This means multiple instances can run in parallel (against different subreddits or time ranges) without coordination, and restarts are cheap.
+- the dedup window (in-memory, 1-hour TTL)
+- the signal aggregator (in-memory, 24-hour TTL)
+- the firehose cursor (durable on disk)
 
-The signal aggregator is in-memory because it's a read-optimized cache of recent data — the source of truth is always S3.
+Everything else lives in S3. Restarts are cheap, and multiple instances can
+in principle run in parallel against partitioned data. The firehose cursor is
+the only piece that requires careful handling under restart.
 
 ## What would change at 100x scale
 
-**Volume**: At high volume, PRAW's single-stream approach becomes a bottleneck. The ingestion layer would need to be parallelized across subreddits with a Kafka topic as the intermediate buffer. Multiple consumer workers would process posts concurrently.
+**Volume.** A single Python process keeping up with 100×Jetstream is
+unrealistic. The firehose client would split: a thin reader writing raw
+events to a Kafka topic at line rate, and a fleet of consumers doing
+parsing / sentiment / writes in parallel. Cursor management moves from
+file → Kafka offsets.
 
-**Deduplication**: The in-memory dedup would move to Redis with TTL-keyed sets, shared across workers.
+**Deduplication.** In-memory dedup → Redis with TTL'd sets, shared across
+worker pool.
 
-**Writes**: Per-hour Parquet files would accumulate quickly. A compaction job (e.g. Spark or Glue) would merge small files into larger ones to keep query performance high.
+**Writes.** Per-hour Parquet files would accumulate small files quickly. A
+compaction job (Glue, Spark) would merge these into 128–512 MB files for
+efficient querying. Iceberg would replace raw Parquet for snapshot isolation
+and schema evolution.
 
-**Sentiment**: At scale, VADER can be parallelized cheaply. If accuracy becomes the bottleneck, FinBERT inference would move to a GPU worker pool with batched inference (32–64 posts per forward pass).
+**Sentiment.** VADER stays cheap to scale horizontally. FinBERT, if needed,
+moves to a GPU pool with batched inference.
 
-**Quality**: The current rule-based validator would be augmented with anomaly detection on posting patterns (e.g. coordinated spam bursts from new accounts).
+**Quality.** The current rule-based validator gets augmented with anomaly
+detection on posting patterns (coordinated bot activity, sudden mention
+spikes from new accounts, duplicate text across many accounts).
 
 ## What was deliberately not built
 
-- **Orchestration / scheduling**: The pipeline is a continuous stream, not a batch job. A scheduler like Airflow would add complexity with no benefit here.
-- **Schema evolution tooling**: Parquet schema changes require a migration strategy (e.g. column defaults, backward-compatible adds). This is a real operational concern at scale, deferred here.
-- **Authentication / secret management**: Credentials are passed via environment variables. In production, these would come from AWS Secrets Manager or Vault.
+- **Orchestration / scheduling.** This is a continuous stream, not a batch
+  job. Airflow would add complexity for no benefit.
+- **Schema evolution tooling.** Parquet schema changes would require a
+  migration strategy (column defaults, backward-compatible adds, dual writes).
+  Real concern at scale, deferred here.
+- **Authentication / secret management.** Credentials via env vars; in
+  production these come from Secrets Manager / Vault.
+- **Backfill from historical data.** Jetstream has a cursor-based replay,
+  but a true backfill (e.g. last 30 days) would require reading from
+  Bluesky's relay servers and is out of scope.
+- **Cross-region failover.** The cursor is local; cross-host failover would
+  require S3-backed cursor and a leader-election layer.

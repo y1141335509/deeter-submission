@@ -6,7 +6,7 @@ import time
 @dataclass
 class RawPost:
     post_id: str
-    subreddit: str
+    source: str  # platform/community identifier (e.g. "bluesky", "demo")
     title: str
     body: str
     score: int
@@ -35,7 +35,7 @@ class QualityReport:
 @dataclass
 class ProcessedPost:
     post_id: str
-    subreddit: str
+    source: str
     title: str
     body: str
     score: int
@@ -55,7 +55,7 @@ class ProcessedPost:
     def to_dict(self) -> dict:
         return {
             "post_id": self.post_id,
-            "subreddit": self.subreddit,
+            "source": self.source,
             "title": self.title,
             "body": self.body,
             "score": self.score,

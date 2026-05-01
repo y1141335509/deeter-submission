@@ -30,7 +30,11 @@ services:
       S3_ACCESS_KEY: minioadmin
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: social-data
+      FIREHOSE_CURSOR_PATH: /var/lib/pipeline/cursor
+    volumes:
+      - pipeline_state:/var/lib/pipeline
     restart: on-failure
 
 volumes:
   minio_data:
+  pipeline_state:

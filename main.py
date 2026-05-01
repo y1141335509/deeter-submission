@@ -14,12 +14,11 @@ logging.basicConfig(
 
 def main():
     settings = Settings()
+    log = logging.getLogger()
     if settings.demo_mode:
-        logging.getLogger().info("Running in DEMO MODE — no Reddit credentials required")
+        log.info("Running in DEMO MODE — synthetic posts, no network ingestion")
     else:
-        if not settings.reddit_client_id or not settings.reddit_client_secret:
-            print("ERROR: Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET, or set DEMO_MODE=true")
-            sys.exit(1)
+        log.info("Running in LIVE MODE — connecting to Bluesky Jetstream firehose")
 
     pipeline = Pipeline(settings)
     pipeline.run()

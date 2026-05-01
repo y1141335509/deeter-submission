@@ -1,15 +1,9 @@
 import os
 from dataclasses import dataclass, field
-from typing import List
 
 
 @dataclass
 class Settings:
-    # Reddit credentials
-    reddit_client_id: str = field(default_factory=lambda: os.getenv("REDDIT_CLIENT_ID", ""))
-    reddit_client_secret: str = field(default_factory=lambda: os.getenv("REDDIT_CLIENT_SECRET", ""))
-    reddit_user_agent: str = field(default_factory=lambda: os.getenv("REDDIT_USER_AGENT", "social-pipeline/1.0"))
-
     # S3 / MinIO
     s3_endpoint: str = field(default_factory=lambda: os.getenv("S3_ENDPOINT", "http://localhost:9000"))
     s3_access_key: str = field(default_factory=lambda: os.getenv("S3_ACCESS_KEY", "minioadmin"))
@@ -22,11 +16,13 @@ class Settings:
     batch_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("BATCH_TIMEOUT", "30")))
     dedup_window_seconds: int = field(default_factory=lambda: int(os.getenv("DEDUP_WINDOW", "3600")))
 
-    # Demo / replay mode — runs without Reddit credentials
+    # Demo mode — generates synthetic posts instead of connecting to Bluesky.
+    # Useful for offline development, CI, and exercising the pipeline without
+    # an internet connection.
     demo_mode: bool = field(default_factory=lambda: os.getenv("DEMO_MODE", "false").lower() == "true")
     demo_posts_per_minute: int = field(default_factory=lambda: int(os.getenv("DEMO_PPM", "120")))
 
-    # Subreddits to ingest
-    subreddits: List[str] = field(default_factory=lambda: os.getenv(
-        "SUBREDDITS", "wallstreetbets,investing,stocks"
-    ).split(","))
+    # Bluesky firehose — Jetstream is a public, unauthenticated WebSocket.
+    firehose_queue_size: int = field(default_factory=lambda: int(os.getenv("FIREHOSE_QUEUE_SIZE", "2000")))
+    firehose_cursor_path: str = field(default_factory=lambda: os.getenv("FIREHOSE_CURSOR_PATH", "/var/lib/pipeline/cursor"))
+    firehose_cursor_save_interval: float = field(default_factory=lambda: float(os.getenv("FIREHOSE_CURSOR_SAVE_INTERVAL", "10")))

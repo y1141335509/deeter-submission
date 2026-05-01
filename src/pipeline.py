@@ -1,10 +1,11 @@
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Protocol
 
 from config.settings import Settings
-from src.ingestion.reddit_poller import RedditPoller
+from src.ingestion.bluesky_firehose import BlueskyFirehose
+from src.ingestion.demo_stream import DemoStream
 from src.models.post import ProcessedPost, RawPost
 from src.processing import sentiment, ticker_extractor
 from src.quality.dedup import Deduplicator
@@ -13,6 +14,12 @@ from src.signals.aggregator import SignalAggregator
 from src.storage.s3_writer import S3Writer
 
 logger = logging.getLogger(__name__)
+
+
+class IngestionSource(Protocol):
+    def start(self) -> None: ...
+    def stop(self, timeout: float = ...) -> None: ...
+    def stream(self): ...
 
 
 @dataclass
@@ -63,7 +70,7 @@ def _process_post(raw: RawPost, quality_threshold: float = 0.5) -> tuple:
 
     post = ProcessedPost(
         post_id=raw.post_id,
-        subreddit=raw.subreddit,
+        source=raw.source,
         title=raw.title,
         body=raw.body,
         score=raw.score,
@@ -88,10 +95,18 @@ def _process_post(raw: RawPost, quality_threshold: float = 0.5) -> tuple:
     return post, report
 
 
+def build_source(settings: Settings) -> IngestionSource:
+    """Choose the ingestion source. Demo mode for offline / CI; Bluesky
+    Jetstream for live runs."""
+    if settings.demo_mode:
+        return DemoStream(settings)
+    return BlueskyFirehose(settings)
+
+
 class Pipeline:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.poller = RedditPoller(settings)
+        self.source: IngestionSource = build_source(settings)
         self.dedup = Deduplicator(settings.dedup_window_seconds)
         self.writer = S3Writer(settings)
         self.aggregator = SignalAggregator()
@@ -100,12 +115,16 @@ class Pipeline:
         self._last_flush = time.time()
 
     def run(self) -> None:
-        logger.info("Pipeline starting")
+        mode = "demo" if self.settings.demo_mode else "live-bluesky"
+        logger.info(f"Pipeline starting (mode={mode})")
+        self.source.start()
         try:
-            for raw in self.poller.stream():
+            for raw in self.source.stream():
                 self._handle(raw)
         except KeyboardInterrupt:
             logger.info("Shutdown signal received — flushing final batch")
+        finally:
+            self.source.stop()
             self._flush()
             self._print_summary()
 
@@ -158,16 +177,28 @@ class Pipeline:
     def _log_metrics(self) -> None:
         snap = self.metrics.snapshot()
         logger.info(
-            f"[metrics] elapsed={snap['elapsed_s']}s "
+            f"[pipeline] elapsed={snap['elapsed_s']}s "
             f"ingested={snap['ingested']} "
             f"processed={snap['processed']} "
             f"written={snap['written']} "
             f"dups={snap['duplicates']} "
             f"quality={snap['quality_pass_rate']:.1%} "
             f"throughput={snap['throughput_per_min']}/min "
-            f"p50={snap['p50_proc_ms']}ms "
-            f"p99={snap['p99_proc_ms']}ms"
+            f"p50={snap['p50_proc_ms']}ms p99={snap['p99_proc_ms']}ms"
         )
+
+        # Surface firehose-level metrics when running live
+        if isinstance(self.source, BlueskyFirehose):
+            fs = self.source.stats.snapshot()
+            logger.info(
+                f"[firehose] received={fs['received_total']} "
+                f"forwarded={fs['forwarded']} "
+                f"non_fin={fs['dropped_non_financial']} "
+                f"queue_full={fs['dropped_queue_full']} "
+                f"reconnects={fs['reconnects']} "
+                f"rate={fs['events_per_sec']}/s "
+                f"lag={fs['feed_lag_s']}s"
+            )
 
     def _print_summary(self) -> None:
         snap = self.metrics.snapshot()

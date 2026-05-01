@@ -60,3 +60,20 @@ class TestTickerExtractor:
     def test_unknown_ticker_ignored(self):
         tickers = ticker_extractor.extract("$ZZZZ is a fake ticker")
         assert "ZZZZ" not in tickers
+
+    def test_lowercase_word_does_not_match_uppercase_ticker(self):
+        # Regression: previously "love low rates" would extract LOW (Lowe's)
+        # because the extractor uppercased the entire text before matching.
+        tickers = ticker_extractor.extract("Tech stocks love low rates and easy money")
+        assert "LOW" not in tickers
+
+    def test_lowercase_dollar_cashtag_still_matches(self):
+        # Cashtags are intentionally case-insensitive — many users type $tsla
+        tickers = ticker_extractor.extract("buying $tsla calls")
+        assert "TSLA" in tickers
+
+    def test_ticker_inside_word_not_matched(self):
+        # "ARE" should not match inside "ARENA"; "GE" should not match inside "general"
+        tickers = ticker_extractor.extract("The ARENA is fine, general comments only")
+        assert "ARE" not in tickers
+        assert "GE" not in tickers

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Parquet schema — explicit types keep files predictable for downstream consumers
 _POST_SCHEMA = pa.schema([
     pa.field("post_id", pa.string()),
-    pa.field("subreddit", pa.string()),
+    pa.field("source", pa.string()),
     pa.field("title", pa.string()),
     pa.field("body", pa.string()),
     pa.field("score", pa.int32()),
@@ -39,7 +39,7 @@ _POST_SCHEMA = pa.schema([
 _MENTION_SCHEMA = pa.schema([
     pa.field("post_id", pa.string()),
     pa.field("ticker", pa.string()),
-    pa.field("subreddit", pa.string()),
+    pa.field("source", pa.string()),
     pa.field("sentiment_compound", pa.float32()),
     pa.field("score", pa.int32()),
     pa.field("created_utc", pa.float64()),
@@ -129,7 +129,7 @@ class S3Writer:
                 mentions.append({
                     "post_id": p.post_id,
                     "ticker": ticker,
-                    "subreddit": p.subreddit,
+                    "source": p.source,
                     "sentiment_compound": p.sentiment_compound,
                     "score": p.score,
                     "created_utc": p.created_utc,
