@@ -310,8 +310,8 @@ def is_financial_text(text: str) -> bool:
 
     Cheap and false-positive-friendly by design. The downstream ticker
     extractor and quality validator do the precise filtering — this just
-    avoids spending CPU on the 95%+ of firehose traffic about food, art,
-    pets, politics, etc.
+    avoids spending CPU on the ~90% of firehose traffic about food, art,
+    pets, politics, etc. (Measured ~10% pass-through over a 14-min run.)
     """
     if not text:
         return False

@@ -27,7 +27,7 @@ to ensure what lands in S3 is actually usable.
    src/ingestion/bluesky_firehose  cursor checkpoint, host rotation
               │
               ▼
-   Financial-relevance prefilter  cheap keyword/cashtag drop ~95% of volume
+   Financial-relevance prefilter  cheap keyword/cashtag drops ~90% of volume
               │
               ▼
    Bounded queue (drop-on-full)   isolates network thread from pipeline,

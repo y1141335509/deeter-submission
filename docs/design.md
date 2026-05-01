@@ -110,7 +110,8 @@ a local file mounted as a Docker volume. Alternatives considered:
 ### Financial-relevance prefilter at ingestion
 
 A keyword/cashtag-based prefilter runs immediately after parsing, before
-sentiment scoring. Most Bluesky posts (~95%) are not about finance, and
+sentiment scoring. The overwhelming majority of Bluesky posts (~90% in the
+live run) are not about finance, and
 running VADER + ticker regex on every post would waste CPU.
 
 This is deliberately a coarse, false-positive-friendly filter. The downstream
